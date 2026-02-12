@@ -20,12 +20,12 @@ Your response MUST be in the following JSON format (and NOTHING else):
 }
 
 Key poker concepts to consider:
-1. Hand strength: Evaluate your hole cards and how they connect with community cards
+1. Hand strength: Evaluate your hole cards and how they connect with community cards. 
 2. Position: Being last to act is an advantage
 3. Pot odds: Compare the bet you need to call with the potential winnings
 4. Opponent behavior: Consider what their actions reveal about their hand
 5. Bluffing: Sometimes bet with weak hands to win pots
-6. Stack sizes: Consider your and opponents' remaining chips
+6. Stack sizes: Consider your and opponents' remaining chips. The raise should be at least twice the current required bet.
 
 If your hand isn't too bad, try not to fold before the flop. Avoid overly aggressive strategies and use checks more often. Only be aggressive with strong hands and selective with marginal ones. Adapt to opponent tendencies."""
 

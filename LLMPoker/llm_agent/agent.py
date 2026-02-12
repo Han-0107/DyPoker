@@ -158,9 +158,14 @@ class LLMAgent:
                 except ValueError:
                     amount = min_total
 
-            if amount < min_total:
+            # 如果raise_amount <= call_amount，说明实际上是call而非raise
+            if amount == call_amount and call_amount > 0 and "call" in valid_actions:
+                action = "call"
+                amount = 0
+            elif amount < min_total:
                 amount = min_total
-            if amount >= your_chips:
+
+            if action == "raise" and amount >= your_chips:
                 action = "all_in"
                 amount = 0
 
