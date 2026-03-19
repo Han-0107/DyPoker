@@ -88,6 +88,9 @@ python main.py --model /path/to/model --tp 2
 
 # 指定GPU（跳过自动检测）
 CUDA_VISIBLE_DEVICES=2,3 python main.py --players 4 --hands 10
+
+# 使用 LoRA 适配器
+python main.py --model /path/to/base --lora /path/to/adapter
 ```
 
 **`main.py` 参数说明：**
@@ -105,6 +108,32 @@ CUDA_VISIBLE_DEVICES=2,3 python main.py --players 4 --hands 10
 | `--max-model-len` | `4096` | 最大序列长度 |
 | `--seed` | `40` | 随机种子 |
 | `--log-level` | `WARNING` | 日志级别 (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
+| `--lora` | `None` | 可选 LoRA 适配器路径（可重复指定） |
+
+### 3. 使用 PokerBench 进行微调
+
+我们提供了 `train_pokerbench.py` 脚本，使用 HuggingFace `datasets/trl/peft` 对模型做 LoRA 微调，支持 QLoRA 四比特加载。
+
+快速示例（单卡小样本）：
+
+```bash
+python train_pokerbench.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --output-dir ./checkpoints/pokerbench-qwen2.5-7b \
+  --max-train-samples 8000 \
+  --epochs 0.5 \
+  --batch-size 1 \
+  --grad-accum-steps 4 \
+  --lr 5e-5 \
+  --max-seq-len 768 \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --lora-dropout 0.1 \
+  --save-steps 1000 \
+  --logging-steps 50
+```
+
+提示：`--merge-lora` 会将 LoRA 权重合并回基模，便于与 vLLM 直接加载；否则输出的即为 LoRA 适配器目录（可通过 `--lora` 传给 `main.py` 使用）。
 
 ### 3. GPU 自动选择
 

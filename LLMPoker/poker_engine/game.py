@@ -253,6 +253,8 @@ class PokerGame:
             "pot": self.pot,
             "current_bet": self.current_bet,
             "min_raise": self.min_raise,
+            "small_blind": self.small_blind,
+            "big_blind": self.big_blind,
             "players": players_info,
             "current_player": current_player.name if current_player else None,
             "valid_actions": [a.value for a in self.get_valid_actions()],

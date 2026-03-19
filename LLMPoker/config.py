@@ -15,14 +15,16 @@ class LLMConfig:
     tensor_parallel_size: int = 1     # GPU并行数
     gpu_memory_utilization: float = 0.9
     max_model_len: int = 4096
+    lora_paths: Optional[List[str]] = None  # 可选 LoRA 适配器目录列表
 
     @classmethod
     def qwen3_32b(
         cls,
         model_path: str = "/research/d7/gds/yhhan25/.cache/modelscope/hub/models/Qwen/Qwen3-32B",
-        tensor_parallel_size: int = 2,
+        tensor_parallel_size: int = 1,
         gpu_memory_utilization: float = 0.9,
         max_model_len: int = 4096,
+        lora_paths: Optional[List[str]] = None,
     ) -> "LLMConfig":
         """快速创建本地Qwen3-32B vLLM配置"""
         return cls(
@@ -31,6 +33,7 @@ class LLMConfig:
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
+            lora_paths=lora_paths,
         )
 
 

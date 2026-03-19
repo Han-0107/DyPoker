@@ -1,0 +1,17 @@
+# Model checkpoints (large files)
+checkpoints/
+LLMPoker/checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Logs & results
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

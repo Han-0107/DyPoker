@@ -1,38 +1,298 @@
 """
 PromptBuilder - 构建发送给LLM的提示词
 将游戏状态转化为LLM可理解的自然语言描述
+支持两种格式：
+  - pokerbench: 与 PokerBench 训练数据一致的自然语言叙述风格
+  - structured: 结构化键值对风格（作为后备）
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+import re
+
+
+# ── 牌面符号 → 英文全称映射 ──
+_RANK_FULL = {
+    "2": "Two", "3": "Three", "4": "Four", "5": "Five",
+    "6": "Six", "7": "Seven", "8": "Eight", "9": "Nine",
+    "T": "Ten", "J": "Jack", "Q": "Queen", "K": "King", "A": "Ace",
+}
+_SUIT_FULL = {
+    "♣": "Club", "♦": "Diamond", "♥": "Heart", "♠": "Spade",
+    "c": "Club", "d": "Diamond", "h": "Heart", "s": "Spade",
+    "C": "Club", "D": "Diamond", "H": "Heart", "S": "Spade",
+}
+
+
+def _card_to_full_name(card_str: str) -> str:
+    """
+    将简短牌面字符串转换为 PokerBench 风格全称。
+    例: 'K♦' -> 'King of Diamond', 'A♠' -> 'Ace of Spade'
+    """
+    card_str = card_str.strip()
+    if len(card_str) < 2:
+        return card_str
+    rank_char = card_str[:-1]
+    suit_char = card_str[-1]
+    rank_name = _RANK_FULL.get(rank_char, rank_char)
+    suit_name = _SUIT_FULL.get(suit_char, suit_char)
+    return f"{rank_name} of {suit_name}"
+
+
+def _card_to_titled(card_str: str) -> str:
+    """
+    将简短牌面字符串转换为 PokerBench 社区牌风格。
+    例: 'K♦' -> 'King Of Diamond'
+    """
+    card_str = card_str.strip()
+    if len(card_str) < 2:
+        return card_str
+    rank_char = card_str[:-1]
+    suit_char = card_str[-1]
+    rank_name = _RANK_FULL.get(rank_char, rank_char)
+    suit_name = _SUIT_FULL.get(suit_char, suit_char)
+    return f"{rank_name} Of {suit_name}"
+
+
+# ── 6-max 位置映射 ──
+_POSITION_NAMES_6MAX = ["UTG", "HJ", "CO", "BTN", "SB", "BB"]
 
 
 class PromptBuilder:
     """构建德州扑克决策所需的Prompt"""
 
-    SYSTEM_PROMPT = """You are an expert Texas Hold'em poker player. You will be given the current game state and must decide on the best action.
+    SYSTEM_PROMPT = """You are an expert 6-max No-Limit Texas Hold'em decision maker. Given the game state, output ONLY JSON with the action you would take.
 
-Your response MUST be in the following JSON format (and NOTHING else):
+Output JSON schema (no prose):
 {
-    "reasoning": "Brief explanation of your thought process",
-    "action": "fold" | "check" | "call" | "raise" | "all_in",
-    "raise_amount": <number, only required if action is "raise">
+  "reasoning": "1-3 short bullet-style thoughts",
+  "action": "fold" | "check" | "call" | "raise" | "all_in",
+  "raise_amount": <number, required only for "raise">,
+  "confidence": 0-1  // optional, omit if unsure
 }
 
-Key poker concepts to consider:
-1. Hand strength: Evaluate your hole cards and how they connect with community cards. 
-2. Position: Being last to act is an advantage
-3. Pot odds: Compare the bet you need to call with the potential winnings
-4. Opponent behavior: Consider what their actions reveal about their hand
-5. Bluffing: Sometimes bet with weak hands to win pots
-6. Stack sizes: Consider your and opponents' remaining chips. The raise should be at least twice the current required bet.
+Rules:
+- Honor the provided valid_actions list; never invent other actions.
+- For raises, amount = max(min_raise + call_amount, minimum table rule) but not exceeding your stack. If amount >= your_chips → use "all_in".
+- If call_amount is 0, prefer check over raise with weak/medium hands; avoid folding preflop unless hand is very weak and pressured.
+- Use pot odds, position, board texture, and action history to justify the move concisely.
+- Keep responses deterministic and well-formatted JSON only (no markdown, no extra text)."""
 
-If your hand isn't too bad, try not to fold before the flop. Avoid overly aggressive strategies and use checks more often. Only be aggressive with strong hands and selective with marginal ones. Adapt to opponent tendencies."""
+    @staticmethod
+    def _get_positions(players: List[Dict], dealer_name: Optional[str] = None) -> Dict[str, str]:
+        """
+        根据玩家列表和庄家确定每个玩家的位置名称。
+        返回 {player_name: position_name}
+        """
+        n = len(players)
+        positions = {}
+
+        # 找到庄家索引
+        dealer_idx = 0
+        if dealer_name:
+            for i, p in enumerate(players):
+                if p["name"] == dealer_name:
+                    dealer_idx = i
+                    break
+
+        if n <= 6:
+            # 使用 6-max 位置名
+            pos_names = _POSITION_NAMES_6MAX[-n:]  # 取最后 n 个位置
+            for i in range(n):
+                player_idx = (dealer_idx + 1 + i) % n
+                # BTN 是 dealer 的下一个在 pos_names 的最后之前
+                positions[players[player_idx]["name"]] = pos_names[i]
+            # 修正：BTN 就是 dealer
+            positions[players[dealer_idx]["name"]] = "BTN"
+            # SB 是 dealer+1, BB 是 dealer+2
+            sb_idx = (dealer_idx + 1) % n
+            bb_idx = (dealer_idx + 2) % n
+            positions[players[sb_idx]["name"]] = "SB"
+            positions[players[bb_idx]["name"]] = "BB"
+            # 其余按顺序分配 UTG, HJ, CO
+            remaining_positions = []
+            if n == 6:
+                remaining_positions = ["UTG", "HJ", "CO"]
+            elif n == 5:
+                remaining_positions = ["UTG", "CO"]
+            elif n == 4:
+                remaining_positions = ["CO"]
+            elif n == 3:
+                remaining_positions = []
+            elif n == 2:
+                # heads-up: BTN=SB
+                positions[players[dealer_idx]["name"]] = "SB"
+                positions[players[(dealer_idx + 1) % n]["name"]] = "BB"
+                return positions
+
+            pos_i = 0
+            for i in range(n):
+                idx = (dealer_idx + 3 + i) % n  # 从BB之后开始
+                name = players[idx]["name"]
+                if name not in [players[dealer_idx]["name"],
+                                players[sb_idx]["name"],
+                                players[bb_idx]["name"]]:
+                    if pos_i < len(remaining_positions):
+                        positions[name] = remaining_positions[pos_i]
+                        pos_i += 1
+        else:
+            # > 6 players，用数字位置
+            for i in range(n):
+                positions[players[i]["name"]] = f"Seat{i+1}"
+
+        return positions
 
     @staticmethod
     def build_decision_prompt(game_state: Dict[str, Any], player_name: str) -> str:
         """
-        根据游戏状态构建决策prompt
+        根据游戏状态构建决策prompt。
+        使用与 PokerBench 训练数据一致的自然语言叙述风格，
+        确保微调模型能正确理解和响应。
+        """
+        parts = []
+        players = game_state.get("players", [])
+        phase = game_state.get("phase", "PREFLOP")
+        pot = game_state.get("pot", 0)
+        community_cards = game_state.get("community_cards", [])
+        hand_cards = game_state.get("your_hand", [])
+        call_amount = game_state.get("call_amount", 0)
+        your_chips = game_state.get("your_chips", 0)
+        min_raise = game_state.get("min_raise", 10)
+        valid_actions = game_state.get("valid_actions", [])
+        current_bet = game_state.get("current_bet", 0)
+        action_history = game_state.get("action_history", [])
+        dealer_name = game_state.get("dealer", None)
+
+        # ── 获取位置映射 ──
+        positions = PromptBuilder._get_positions(players, dealer_name)
+        my_position = positions.get(player_name, "?")
+
+        # ── PokerBench 风格的自然语言叙述 ──
+        parts.append("You are a specialist in playing 6-handed No Limit Texas Holdem. "
+                      "The following will be a game scenario and you need to make the optimal decision.")
+        parts.append("")
+        parts.append("Here is a game summary:")
+        parts.append("")
+
+        # 盲注和筹码信息
+        sb = game_state.get("small_blind", 5)
+        bb = game_state.get("big_blind", 10)
+        # 从 action_history 推断盲注大小
+        if not sb and action_history:
+            for h in action_history[:2]:
+                if h.get("amount"):
+                    if sb == 0:
+                        sb = h["amount"]
+                    else:
+                        bb = h["amount"]
+                        break
+
+        # 找到初始筹码（使用当前筹码近似）
+        max_chips = max((p["chips"] for p in players), default=1000)
+        # 大致估算初始筹码（四舍五入到常见值）
+        initial_chips = max_chips
+
+        parts.append(f"The small blind is {sb} chips and the big blind is {bb} chips. "
+                      f"Everyone started with {initial_chips} chips.")
+
+        # 位置列表
+        active_positions = []
+        for p in players:
+            pos = positions.get(p["name"], "?")
+            active_positions.append(pos)
+        parts.append(f"The player positions involved in this game are {', '.join(active_positions)}.")
+
+        # 你的位置和手牌
+        if hand_cards:
+            hand_str = " and ".join(_card_to_full_name(c) for c in hand_cards)
+            parts.append(f"In this hand, your position is {my_position}, "
+                          f"and your holding is [{hand_str}].")
+        else:
+            parts.append(f"In this hand, your position is {my_position}.")
+
+        # ── 行动历史（按阶段描述）──
+        if action_history:
+            # 将行动按阶段分组
+            preflop_actions = []
+            flop_actions = []
+            turn_actions = []
+            river_actions = []
+
+            # 简单的阶段追踪：盲注算preflop
+            current_phase_actions = preflop_actions
+            # 我们需要根据community_cards和动作推断阶段
+            # 简化处理：根据时间顺序和已知阶段分配
+            for h in action_history:
+                action_str = h.get("action", "fold")
+                amount = h.get("amount", 0)
+                p_name = h.get("player", "")
+                p_pos = positions.get(p_name, p_name)
+
+                if action_str == "fold":
+                    current_phase_actions.append(f"{p_pos} fold")
+                elif action_str == "check":
+                    current_phase_actions.append(f"{p_pos} check")
+                elif action_str == "call":
+                    current_phase_actions.append(f"{p_pos} call")
+                elif action_str == "raise":
+                    current_phase_actions.append(f"{p_pos} raise {amount} chips")
+                elif action_str == "all_in":
+                    current_phase_actions.append(f"{p_pos} all-in {amount} chips")
+
+            # 描述翻牌前行动
+            if preflop_actions:
+                # 去掉盲注（前2个通常是盲注）
+                game_actions = preflop_actions[2:] if len(preflop_actions) > 2 else []
+                if game_actions:
+                    folded_positions = set(active_positions) - {positions.get(h.get("player", ""), "?")
+                                                                 for h in action_history
+                                                                 if h.get("action") != "fold"}
+                    action_desc = ", and ".join(game_actions)
+                    parts.append(f"Before the flop, {action_desc}.")
+                    if folded_positions:
+                        parts.append("Assume that all other players that is not mentioned folded.")
+
+        # ── 公共牌描述 ──
+        if community_cards:
+            if len(community_cards) >= 3:
+                flop = community_cards[:3]
+                flop_str = ", and ".join(_card_to_titled(c) for c in flop)
+                # 收集flop阶段之后的action
+                parts.append(f"The flop comes {flop_str}.")
+            if len(community_cards) >= 4:
+                turn = community_cards[3]
+                parts.append(f"The turn comes {_card_to_titled(turn)}.")
+            if len(community_cards) >= 5:
+                river = community_cards[4]
+                parts.append(f"The river comes {_card_to_titled(river)}.")
+
+        parts.append("")
+        parts.append("")
+
+        # ── 决策提示 ──
+        parts.append("Now it is your turn to make a move.")
+        if hand_cards:
+            hand_str = " and ".join(_card_to_full_name(c) for c in hand_cards)
+            parts.append(f"To remind you, the current pot size is {pot} chips, "
+                          f"and your holding is [{hand_str}].")
+        else:
+            parts.append(f"To remind you, the current pot size is {pot} chips.")
+
+        # 额外上下文（不在 PokerBench 中但对实时游戏很重要）
+        parts.append(f"Your chips: {your_chips}. Amount to call: {call_amount}. "
+                      f"Minimum raise: {min_raise}.")
+        parts.append(f"Valid actions: {', '.join(valid_actions)}.")
+        parts.append("")
+        parts.append("Decide on an action based on the strength of your hand on this board, "
+                      "your position, and actions before you. Do not explain your answer.")
+        parts.append("Your optimal action is:")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def build_decision_prompt_structured(game_state: Dict[str, Any], player_name: str) -> str:
+        """
+        结构化键值对风格的决策prompt（作为后备格式）
         """
         parts = []
 

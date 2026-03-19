@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from typing import Optional
 
 # 项目路径
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -312,12 +313,13 @@ def run_game(
     small_blind: int = 5,
     big_blind: int = 10,
     model_path: str = QWEN3_32B_PATH,
-    tensor_parallel_size: int = 2,
+    tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
     max_model_len: int = 4096,
     seed: int = 42,
     log_level: str = "WARNING",
     output_md: str = "",
+    lora_paths: Optional[list[str]] = None,
 ):
     """运行Qwen3-32B德州扑克对局"""
 
@@ -350,6 +352,7 @@ def run_game(
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
+        lora_paths=lora_paths,
     )
 
     # ── 创建玩家和Agent ──
@@ -371,6 +374,7 @@ def run_game(
             vllm_tensor_parallel_size=tensor_parallel_size,
             vllm_gpu_memory_utilization=gpu_memory_utilization,
             vllm_max_model_len=max_model_len,
+            lora_paths=lora_paths,
         )
 
     # ── 创建游戏 ──
@@ -501,15 +505,21 @@ def main():
     parser.add_argument("--chips", type=int, default=1000, help="初始筹码 (默认1000)")
     parser.add_argument("--small-blind", type=int, default=5, help="小盲注 (默认5)")
     parser.add_argument("--big-blind", type=int, default=10, help="大盲注 (默认10)")
-    parser.add_argument("--model", default=QWEN3_32B_PATH, help="模型路径")
-    parser.add_argument("--tp", type=int, default=2, help="Tensor parallel GPU数 (默认2)")
+    parser.add_argument("--model", default="./checkpoints/pokerbench-qwen2.5-7b-soft", help="模型路径")
+    parser.add_argument("--tp", type=int, default=1, help="Tensor parallel GPU数 (默认1；BitsAndBytes量化模型建议保持1)")
     parser.add_argument("--gpu-util", type=float, default=0.9, help="GPU显存利用率 (默认0.9)")
     parser.add_argument("--max-model-len", type=int, default=10000, help="最大序列长度 (默认10000)")
     parser.add_argument("--seed", type=int, default=40, help="随机种子 (默认42)")
-    parser.add_argument("--log-level", default="WARNING",
+    parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="日志级别 (默认WARNING)")
+                        help="日志级别 (默认INFO)")
     parser.add_argument("--output", default="./result/game.md", help="输出Markdown文件路径")
+    parser.add_argument(
+        "--lora",
+        action="append",
+        default=None,
+        help="可选 LoRA 适配器路径（可重复指定多个）",
+    )
 
     args = parser.parse_args()
 
@@ -529,6 +539,7 @@ def main():
         seed=args.seed,
         log_level=args.log_level,
         output_md=args.output,
+        lora_paths=args.lora,
     )
 
 
