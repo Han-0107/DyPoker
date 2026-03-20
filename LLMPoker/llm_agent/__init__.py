@@ -7,6 +7,5 @@ from .prompt_builder import PromptBuilder
 
 __all__ = [
     "LLMAgent",
-    "RandomAgent",
     "PromptBuilder",
 ]

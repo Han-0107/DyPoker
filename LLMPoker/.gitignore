@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environments
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Checkpoints (large model files)
+checkpoints/*/optimizer.pt
+checkpoints/*/rng_state.pth
+checkpoints/*/scheduler.pt
+
+# Game logs (auto-generated)
+game_log_*.md
+
+# Jupyter
+.ipynb_checkpoints/

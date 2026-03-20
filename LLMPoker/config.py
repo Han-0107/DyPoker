@@ -42,7 +42,7 @@ class PlayerConfig:
     """玩家配置"""
     name: str
     chips: int = 1000
-    agent_type: str = "llm"  # "llm", "random"
+    agent_type: str = "llm"  # "llm", "random", "human"
     llm_config: Optional[LLMConfig] = None
 
 
@@ -78,6 +78,35 @@ class GameConfig:
             ],
             num_hands=50,
         )
+
+    @classmethod
+    def human_vs_llm(
+        cls,
+        n_ai: int = 3,
+        human_name: str = "You",
+        chips: int = 1000,
+        num_hands: int = 20,
+        model_path: str = "/research/d7/gds/yhhan25/.cache/modelscope/hub/models/Qwen/Qwen3-32B",
+        tensor_parallel_size: int = 1,
+    ) -> "GameConfig":
+        """人类 vs LLM 对局"""
+        llm = LLMConfig.qwen3_32b(
+            model_path=model_path,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+        players = [
+            PlayerConfig(name=human_name, chips=chips, agent_type="human"),
+        ]
+        ai_names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank",
+                     "Grace", "Hank", "Ivy", "Jack"]
+        for i in range(n_ai):
+            players.append(PlayerConfig(
+                name=ai_names[i] if i < len(ai_names) else f"AI_{i+1}",
+                chips=chips,
+                agent_type="llm",
+                llm_config=llm,
+            ))
+        return cls(players=players, num_hands=num_hands)
 
     @classmethod
     def multi_player(cls, n: int = 4) -> "GameConfig":

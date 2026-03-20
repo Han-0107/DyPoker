@@ -5,7 +5,7 @@ This script trains (or LoRA-fine-tunes) a chat model so it can make poker
 decisions consistent with the PokerBench optimal actions.
 
 Example:
-    python train_pokerbench.py \
+    python -m training.train_pokerbench \
         --model Qwen/Qwen2.5-7B-Instruct \
         --output-dir ./checkpoints/pokerbench-qwen2.5-7b \
         --max-train-samples 20000 \
@@ -19,7 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from typing import Optional
+
+# 确保项目根目录在 sys.path 中
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_DIR)
 
 from datasets import load_dataset
 from peft import LoraConfig
@@ -32,7 +37,7 @@ from transformers import (
 from trl import SFTTrainer
 
 from llm_agent.prompt_builder import PromptBuilder
-from pokerbench_utils import build_action_json, parse_pokerbench_label
+from utils.pokerbench_utils import build_action_json, parse_pokerbench_label
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,9 +76,7 @@ def build_chat_sample(tokenizer, instruction: str, label: str) -> str:
         {"role": "assistant", "content": assistant_json},
     ]
     return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
+        messages, tokenize=False, add_generation_prompt=False,
     )
 
 
@@ -83,13 +86,13 @@ def main():
 
     # 1) Load dataset
     raw_ds = load_dataset("RZ412/PokerBench", split=args.split)
-    # 记录一个示例，用于训练结束后生成 sanity prompt（避免列被 map 删除）
     sample_example = raw_ds[0]
     if args.max_train_samples:
         raw_ds = raw_ds.shuffle(seed=args.seed).select(range(args.max_train_samples))
 
-    # train/val split
-    dataset = raw_ds.train_test_split(test_size=min(0.02, max(50 / len(raw_ds), 0.01)), seed=args.seed)
+    dataset = raw_ds.train_test_split(
+        test_size=min(0.02, max(50 / len(raw_ds), 0.01)), seed=args.seed
+    )
     train_ds = dataset["train"]
     eval_ds = dataset["test"]
     if args.max_eval_samples:
@@ -106,40 +109,35 @@ def main():
     if args.use_4bit:
         try:
             import bitsandbytes  # type: ignore  # noqa: F401
-
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
             )
-        except Exception as exc:  # pragma: no cover
-            print(
-                "[warn] bitsandbytes not available; falling back to full precision. "
-                "Install bitsandbytes>=0.43.0 to enable --use-4bit."
-            )
+        except Exception:
+            print("[warn] bitsandbytes not available; falling back to full precision.")
             bnb_config = None
             args.use_4bit = False
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        trust_remote_code=True,
-        device_map="auto",
+        args.model, trust_remote_code=True, device_map="auto",
         quantization_config=bnb_config,
     )
 
     # 4) LoRA config
     lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+        bias="none", task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
     )
 
-    # 5) Pre-tokenize to text field (avoid TRL older formatting_func quirks)
+    # 5) Pre-tokenize
     def to_text_batch(examples):
-        texts = [build_chat_sample(tokenizer, ins, out) for ins, out in zip(examples["instruction"], examples["output"])]
+        texts = [
+            build_chat_sample(tokenizer, ins, out)
+            for ins, out in zip(examples["instruction"], examples["output"])
+        ]
         return {"text": texts}
 
     train_ds = train_ds.map(to_text_batch, batched=True, remove_columns=train_ds.column_names)
@@ -167,50 +165,40 @@ def main():
     try:
         training_args = TrainingArguments(**training_args_kwargs)
     except TypeError:
-        # 兼容旧版 transformers，去掉 evaluation 相关参数
         training_args_kwargs.pop("evaluation_strategy", None)
         training_args_kwargs.pop("eval_steps", None)
         training_args = TrainingArguments(**training_args_kwargs)
 
-    trainer_tokenizer = tokenizer
     try:
         trainer = SFTTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            tokenizer=tokenizer,
-            peft_config=lora_config,
-            dataset_text_field="text",
-            max_seq_length=args.max_seq_len,
+            model=model, args=training_args,
+            train_dataset=train_ds, eval_dataset=eval_ds,
+            tokenizer=tokenizer, peft_config=lora_config,
+            dataset_text_field="text", max_seq_length=args.max_seq_len,
             packing=True,
         )
     except TypeError:
-        # 兼容更旧版 TRL：去掉 tokenizer / max_seq_length / packing
         try:
             trainer = SFTTrainer(
-                model=model,
-                args=training_args,
-                train_dataset=train_ds,
-                eval_dataset=eval_ds,
-                peft_config=lora_config,
-                dataset_text_field="text",
+                model=model, args=training_args,
+                train_dataset=train_ds, eval_dataset=eval_ds,
+                peft_config=lora_config, dataset_text_field="text",
             )
         except TypeError:
-            # 最后退：仅保留必要参数
             trainer = SFTTrainer(
-                model=model,
-                args=training_args,
-                train_dataset=train_ds,
-                peft_config=lora_config,
+                model=model, args=training_args,
+                train_dataset=train_ds, peft_config=lora_config,
             )
 
     trainer.train()
 
     # 7) Save
     trainer.save_state()
-    # Trainer.tokenizer 已弃用，优先使用 processing_class；保底用原 tokenizer
-    tokenizer_to_save = getattr(trainer, "processing_class", None) or getattr(trainer, "tokenizer", None) or tokenizer
+    tokenizer_to_save = (
+        getattr(trainer, "processing_class", None)
+        or getattr(trainer, "tokenizer", None)
+        or tokenizer
+    )
     try:
         tokenizer_to_save.save_pretrained(args.output_dir)
     except Exception:
@@ -221,7 +209,7 @@ def main():
             merged = trainer.model.merge_and_unload()
             merged.save_pretrained(args.output_dir)
             print("Merged LoRA weights into base model.")
-        except Exception as exc:  # pragma: no cover - best-effort
+        except Exception as exc:
             print(f"[warn] merge_and_unload failed: {exc}. Saving adapter instead.")
             trainer.model.save_pretrained(args.output_dir)
     else:
@@ -230,13 +218,14 @@ def main():
     with open(os.path.join(args.output_dir, "system_prompt.txt"), "w", encoding="utf-8") as f:
         f.write(PromptBuilder.SYSTEM_PROMPT)
 
-    # Dump a tiny example for sanity
     try:
         if all(k in sample_example for k in ["instruction", "output"]):
-            sample = build_chat_sample(tokenizer, sample_example["instruction"], sample_example["output"])
-            with open(os.path.join(args.output_dir, "sample_prompt.txt"), "w", encoding="utf-8") as f:
+            sample = build_chat_sample(tokenizer, sample_example["instruction"],
+                                       sample_example["output"])
+            with open(os.path.join(args.output_dir, "sample_prompt.txt"), "w",
+                      encoding="utf-8") as f:
                 f.write(sample)
-    except Exception as exc:  # best-effort
+    except Exception as exc:
         print(f"[warn] failed to write sample_prompt.txt: {exc}")
 
     print("Training complete. Saved to", args.output_dir)

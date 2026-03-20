@@ -1,6 +1,10 @@
 import json
+import sys
+import os
 
-from pokerbench_utils import build_action_json, parse_pokerbench_label
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.pokerbench_utils import build_action_json, parse_pokerbench_label
 
 
 def test_parse_simple_actions():
