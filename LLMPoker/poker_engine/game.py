@@ -34,6 +34,8 @@ class ActionType(Enum):
     CALL = "call"
     RAISE = "raise"
     ALL_IN = "all_in"
+    BLIND = "blind"      # 盲注（不在valid_actions中，仅用于action_history）
+    PHASE = "phase"      # 阶段标记（不在valid_actions中，仅用于action_history分隔）
 
 
 @dataclass
@@ -173,9 +175,9 @@ class PokerGame:
         logger.info(f"{bb_player.name} posts big blind: {bb_actual}")
 
         self.action_history.append(
-            Action(sb_player.name, ActionType.RAISE, sb_actual))
+            Action(sb_player.name, ActionType.BLIND, sb_actual))
         self.action_history.append(
-            Action(bb_player.name, ActionType.RAISE, bb_actual))
+            Action(bb_player.name, ActionType.BLIND, bb_actual))
 
     def _set_first_actor_preflop(self):
         """设置翻牌前第一个行动的玩家（大盲后面）"""
@@ -418,6 +420,9 @@ class PokerGame:
 
         if self.phase == GamePhase.PREFLOP:
             self.phase = GamePhase.FLOP
+            # 在action_history中插入阶段标记
+            self.action_history.append(
+                Action("_dealer", ActionType.PHASE, 0))
             # Burn one, deal three
             self.deck.deal(1)  # burn
             self.community_cards.extend(self.deck.deal(3))
@@ -426,6 +431,8 @@ class PokerGame:
 
         elif self.phase == GamePhase.FLOP:
             self.phase = GamePhase.TURN
+            self.action_history.append(
+                Action("_dealer", ActionType.PHASE, 0))
             self.deck.deal(1)  # burn
             turn_card = self.deck.deal_one()
             self.community_cards.append(turn_card)
@@ -434,6 +441,8 @@ class PokerGame:
 
         elif self.phase == GamePhase.TURN:
             self.phase = GamePhase.RIVER
+            self.action_history.append(
+                Action("_dealer", ActionType.PHASE, 0))
             self.deck.deal(1)  # burn
             river_card = self.deck.deal_one()
             self.community_cards.append(river_card)

@@ -214,33 +214,38 @@ def parse_phh_hand(filepath: str) -> Optional[ParsedHand]:
                     "player_idx": p_idx, "action": "fold", "amount": 0,
                 })
             elif action_type == "cc":
+                # 确定当前street上的最大下注
                 max_bet_current_street = 0.0
                 street_has_board = False
-                for prev_a in parsed_actions:
-                    if prev_a.get("_street_reset"):
-                        max_bet_current_street = 0.0
-                        street_has_board = True
 
-                if not street_has_board:
-                    for bi, blind_val in enumerate(blinds):
-                        if blind_val > max_bet_current_street:
-                            max_bet_current_street = blind_val
-
+                # 扫描所有之前的action, 找到最后一次street reset
                 last_reset = -1
                 for ai, prev_a in enumerate(parsed_actions):
                     if prev_a.get("_street_reset"):
                         last_reset = ai
+                        street_has_board = True
 
+                if not street_has_board:
+                    # Preflop: 盲注是初始的max bet
+                    for bi, blind_val in enumerate(blinds):
+                        if blind_val > max_bet_current_street:
+                            max_bet_current_street = blind_val
+
+                # 在当前street内, 找最大的raise(cbr)
                 for prev_a in parsed_actions[last_reset + 1:]:
+                    if prev_a.get("_street_reset"):
+                        continue
                     if prev_a["action"] == "raise" and prev_a["amount"] > max_bet_current_street:
                         max_bet_current_street = prev_a["amount"]
 
-                is_check = (max_bet_current_street == 0) or (
-                    not street_has_board and p_idx < len(blinds) and
-                    blinds[p_idx] >= max_bet_current_street
-                )
-                if street_has_board and max_bet_current_street == 0:
-                    is_check = True
+                # 判断是 check 还是 call
+                if street_has_board:
+                    # Postflop: 如果没有任何raise, 就是check
+                    is_check = (max_bet_current_street == 0)
+                else:
+                    # Preflop: BB check (自己的blind >= max bet), 否则是 call
+                    player_blind = blinds[p_idx] if p_idx < len(blinds) else 0
+                    is_check = (player_blind >= max_bet_current_street)
 
                 parsed_actions.append({
                     "player_idx": p_idx,
@@ -319,8 +324,13 @@ def build_game_state_at_action(
     num_players = len(hand.players)
     actions_before = hand.actions[:action_idx]
 
+    # ── 从 raw_actions 中提取公共牌和街道边界 ──
     board_cards_seen: List[str] = []
+    # 记录每个 parsed action 之前是否有 street reset (db)
+    # street_reset_before_action[i] = True 如果在第i个action之前有新的board
+    street_reset_before_action: Dict[int, bool] = {}
     parsed_action_count = 0
+    pending_reset = False
 
     for raw_act in hand.raw_actions:
         parts = raw_act.strip().split()
@@ -333,7 +343,11 @@ def build_game_state_at_action(
             for i in range(0, len(board_str), 2):
                 if i + 2 <= len(board_str):
                     board_cards_seen.append(board_str[i:i + 2])
+            pending_reset = True
         elif actor != "d" and act_type in ("f", "cc", "cbr"):
+            if pending_reset:
+                street_reset_before_action[parsed_action_count] = True
+                pending_reset = False
             parsed_action_count += 1
             if parsed_action_count > action_idx:
                 break
@@ -369,10 +383,20 @@ def build_game_state_at_action(
                 current_max_bet = blind
 
     phase_actions_desc = []
-    for a in actions_before:
+    for ai, a in enumerate(actions_before):
         pidx = a["player_idx"]
         act = a["action"]
         amt = a["amount"]
+
+        # 如果在这个action之前有新的street, 插入 phase 标记并重置 bets
+        if street_reset_before_action.get(ai, False):
+            phase_actions_desc.append({
+                "player": "_dealer", "action": "phase", "amount": 0,
+            })
+            # 新street: 重置每个玩家的当前下注
+            for k in player_bets:
+                player_bets[k] = 0.0
+            current_max_bet = 0.0
 
         if act == "fold":
             folded.add(pidx)
@@ -386,14 +410,22 @@ def build_game_state_at_action(
             phase_actions_desc.append({
                 "player": hand.players[pidx], "action": "call", "amount": call_amt,
             })
+        elif act == "check":
+            phase_actions_desc.append({
+                "player": hand.players[pidx], "action": "check", "amount": 0,
+            })
         elif act == "raise":
             if amt > 0:
-                added = amt - player_bets[pidx]
+                # PHH amount 是累计总额, 转换为增量 (额外投入的筹码)
+                incremental = amt - player_bets[pidx]
                 player_bets[pidx] = amt
-                pot += max(added, 0)
+                pot += max(incremental, 0)
                 current_max_bet = max(current_max_bet, amt)
+            else:
+                incremental = 0
             phase_actions_desc.append({
-                "player": hand.players[pidx], "action": "raise", "amount": amt,
+                "player": hand.players[pidx], "action": "raise",
+                "amount": max(incremental, 0),  # 增量金额
             })
 
     call_amount = max(current_max_bet - player_bets[player_idx], 0)
@@ -475,6 +507,59 @@ def build_prompt_for_decision(
 #  Dataset Collection
 # ─────────────────────────────────────────────────────────
 
+def _generate_reasoning(
+    act: str,
+    amt: Optional[float],
+    action: Dict[str, Any],
+    hand: ParsedHand,
+    action_idx: int,
+    player_idx: int,
+) -> str:
+    """Generate a brief reasoning string based on the action context.
+
+    Produces varied, contextual reasoning instead of a static placeholder.
+    """
+    pos = get_position_name(player_idx, len(hand.players), len(hand.players) - 1)
+
+    # 计算已发的公共牌数量来判断街道
+    board_count = 0
+    pa_count = 0
+    for raw in hand.raw_actions:
+        parts = raw.strip().split()
+        if len(parts) < 2:
+            continue
+        if parts[0] == "d" and parts[1] == "db":
+            board_str = parts[2] if len(parts) > 2 else ""
+            board_count += len(board_str) // 2
+        elif parts[0] != "d" and parts[1] in ("f", "cc", "cbr"):
+            pa_count += 1
+            if pa_count > action_idx:
+                break
+
+    if board_count == 0:
+        street = "preflop"
+    elif board_count <= 3:
+        street = "on the flop"
+    elif board_count == 4:
+        street = "on the turn"
+    else:
+        street = "on the river"
+
+    if act == "fold":
+        return f"Fold {street} from {pos}; hand not strong enough to continue."
+    elif act == "check":
+        return f"Check {street} from {pos}; pot control or trapping."
+    elif act == "call":
+        return f"Call {street} from {pos}; pot odds justify continuing."
+    elif act == "raise":
+        if amt and amt > 0:
+            return f"Raise {street} from {pos}; value bet or semi-bluff, sizing {int(amt)} chips."
+        return f"Raise {street} from {pos}; applying pressure."
+    elif act == "all_in":
+        return f"All-in {street} from {pos}; maximum pressure or value."
+    return "Expert play."
+
+
 def collect_phh_files(data_dir: str, max_files: int = 0) -> List[str]:
     """Recursively collect all .phh files from data_dir."""
     patterns = [os.path.join(data_dir, "**", "*.phh")]
@@ -529,8 +614,31 @@ def extract_winner_training_samples(
                 continue
 
             act = action["action"]
-            amt = action["amount"] if action["action"] == "raise" else None
-            completion = build_action_json(act, amt, reasoning="Expert strategy")
+            if act == "raise" and action["amount"] > 0:
+                # PHH amount 是累计总额, 需要转为增量
+                # 重建当时的 game_state 来获取玩家当时的已下注额
+                gs = build_game_state_at_action(hand, action_idx, player_idx)
+                if gs is not None:
+                    # 从 game_state 中获取当时玩家需要的增量
+                    # call_amount = current_max_bet - player_current_bet
+                    # raise 的增量 = PHH_cumulative - player_current_bet
+                    # 但 gs 已经帮我们算好了 call_amount 和 your_chips
+                    # 更直接的方法: 从 players_info 获取 current_bet
+                    player_current_bet = 0.0
+                    for p_info in gs["players"]:
+                        if p_info["name"] == hand.players[player_idx]:
+                            player_current_bet = p_info["current_bet"]
+                            break
+                    incremental_amount = action["amount"] - player_current_bet
+                    amt = max(incremental_amount, 0)
+                else:
+                    amt = action["amount"]
+            else:
+                amt = None
+
+            # 生成有信息量的 reasoning
+            reasoning = _generate_reasoning(act, amt, action, hand, action_idx, player_idx)
+            completion = build_action_json(act, amt, reasoning=reasoning)
 
             samples.append({"prompt": prompt, "completion": completion})
 

@@ -72,7 +72,7 @@ def run_game(
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.9,
     max_model_len: int = 4096,
-    seed: int = 42,
+    seed: Optional[int] = None,
     log_level: str = "WARNING",
     output_md: str = "",
     lora_paths: Optional[list[str]] = None,
@@ -320,7 +320,8 @@ def main():
                         help="GPU显存利用率 (默认0.9)")
     parser.add_argument("--max-model-len", type=int, default=10000,
                         help="最大序列长度 (默认10000)")
-    parser.add_argument("--seed", type=int, default=40, help="随机种子 (默认40)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="随机种子 (默认None=每次随机, 设为整数则可复现)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="日志级别 (默认INFO)")

@@ -212,45 +212,60 @@ Rules:
 
         # ── 行动历史（按阶段描述）──
         if action_history:
-            # 将行动按阶段分组
-            preflop_actions = []
-            flop_actions = []
-            turn_actions = []
-            river_actions = []
-
-            # 简单的阶段追踪：盲注算preflop
-            current_phase_actions = preflop_actions
-            # 我们需要根据community_cards和动作推断阶段
-            # 简化处理：根据时间顺序和已知阶段分配
+            # 将行动按阶段分组 (用 "phase" 标记分隔)
+            streets: List[List[Dict]] = [[]]  # 第一组 = preflop
             for h in action_history:
-                action_str = h.get("action", "fold")
-                amount = h.get("amount", 0)
-                p_name = h.get("player", "")
-                p_pos = positions.get(p_name, p_name)
+                if h.get("action") == "phase":
+                    streets.append([])
+                    continue
+                streets[-1].append(h)
 
-                if action_str == "fold":
-                    current_phase_actions.append(f"{p_pos} fold")
-                elif action_str == "check":
-                    current_phase_actions.append(f"{p_pos} check")
-                elif action_str == "call":
-                    current_phase_actions.append(f"{p_pos} call")
-                elif action_str == "raise":
-                    current_phase_actions.append(f"{p_pos} raise {amount} chips")
-                elif action_str == "all_in":
-                    current_phase_actions.append(f"{p_pos} all-in {amount} chips")
+            street_names = ["preflop", "flop", "turn", "river"]
 
-            # 描述翻牌前行动
-            if preflop_actions:
-                # 去掉盲注（前2个通常是盲注）
-                game_actions = preflop_actions[2:] if len(preflop_actions) > 2 else []
-                if game_actions:
-                    folded_positions = set(active_positions) - {positions.get(h.get("player", ""), "?")
-                                                                 for h in action_history
-                                                                 if h.get("action") != "fold"}
-                    action_desc = ", and ".join(game_actions)
-                    parts.append(f"Before the flop, {action_desc}.")
-                    if folded_positions:
+            for si, street_actions in enumerate(streets):
+                if not street_actions:
+                    continue
+
+                # 过滤掉盲注 (blind)
+                game_actions = [a for a in street_actions
+                                if a.get("action") != "blind"]
+                if not game_actions:
+                    continue
+
+                # 构造每个行动的描述文本
+                descs = []
+                for h in game_actions:
+                    action_str = h.get("action", "fold")
+                    amount = h.get("amount", 0)
+                    p_name = h.get("player", "")
+                    p_pos = positions.get(p_name, p_name)
+
+                    if action_str == "fold":
+                        descs.append(f"{p_pos} fold")
+                    elif action_str == "check":
+                        descs.append(f"{p_pos} check")
+                    elif action_str == "call":
+                        descs.append(f"{p_pos} call")
+                    elif action_str == "raise":
+                        descs.append(f"{p_pos} raise {amount} chips")
+                    elif action_str == "all_in":
+                        descs.append(f"{p_pos} all-in {amount} chips")
+
+                if descs:
+                    sname = street_names[si] if si < len(street_names) else f"street{si}"
+                    if sname == "preflop":
+                        action_desc = ", and ".join(descs)
+                        parts.append(f"Before the flop, {action_desc}.")
                         parts.append("Assume that all other players that is not mentioned folded.")
+                    elif sname == "flop":
+                        action_desc = ", and ".join(descs)
+                        parts.append(f"On the flop, {action_desc}.")
+                    elif sname == "turn":
+                        action_desc = ", and ".join(descs)
+                        parts.append(f"On the turn, {action_desc}.")
+                    elif sname == "river":
+                        action_desc = ", and ".join(descs)
+                        parts.append(f"On the river, {action_desc}.")
 
         # ── 公共牌描述 ──
         if community_cards:
