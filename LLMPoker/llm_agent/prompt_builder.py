@@ -364,6 +364,95 @@ Rules:
 
         return "\n".join(parts)
 
+    OPPONENT_ANALYSIS_SYSTEM_PROMPT = """You are an expert poker opponent profiler. You specialize in analyzing opponents' historical actions to classify their playing style.
+
+Based on the statistical data and action patterns provided, classify each opponent into ONE of the following strategy types:
+
+1. ABC Player / Balanced (13% population): Evenly distributed actions pre/post-flop; no distinct strategic preference.
+2. Selective Value Aggressor (3%): Calls/raises post-flop mainly in high-value situations; seeks value selectively.
+3. Tight-Passive / Rock (21%): Conservative pre-flop selection; predominantly passive post-flop, preferring checks/calls.
+4. Positional Grinder (15%): Favors small late-position pre-flop raises; exploits position for incremental gains.
+5. Weak-Tight / Passive Recreational (33%): Most common type; mostly checks post-flop; passive and folds under pressure.
+6. Loose-Passive / Calling Station (10%): Frequently calls pre/post-flop; rarely raises; often calls down with weak hands.
+7. Early-Position Aggressor (5%): Frequently makes small early-position pre-flop raises; aims to establish pre-flop dominance.
+
+For each opponent, provide:
+- The classified strategy type
+- A confidence level (0-1)
+- Specific counter-strategy advice for the current situation
+
+Output JSON schema (no prose):
+{
+  "opponents": [
+    {
+      "name": "opponent_name",
+      "strategy_type": "type_name",
+      "confidence": 0-1,
+      "counter_strategy": "specific advice for current hand"
+    }
+  ],
+  "overall_table_advice": "general advice considering all opponents"
+}
+
+Keep responses deterministic and well-formatted JSON only (no markdown, no extra text)."""
+
+    @staticmethod
+    def build_opponent_analysis_prompt(
+        game_state: Dict[str, Any],
+        player_name: str,
+        opponent_analysis_text: str,
+    ) -> str:
+        """
+        构建对手分析 Agent 的 prompt。
+        将统计数据和当前游戏情况提供给 LLM 进行对手策略分析。
+
+        Args:
+            game_state: 当前游戏状态
+            player_name: 当前玩家名称
+            opponent_analysis_text: OpponentAnalyzer 生成的统计分析文本
+
+        Returns:
+            str: 对手分析 prompt
+        """
+        parts = []
+        parts.append("You are analyzing the opponents at a 6-max No-Limit Texas Hold'em table.")
+        parts.append("")
+        parts.append("=== Current Game Context ===")
+        parts.append(f"Phase: {game_state.get('phase', '?')}")
+        parts.append(f"Pot: {game_state.get('pot', 0)} chips")
+
+        hand_cards = game_state.get("your_hand", [])
+        if hand_cards:
+            parts.append(f"Your hand: {' '.join(hand_cards)}")
+
+        community = game_state.get("community_cards", [])
+        if community:
+            parts.append(f"Community cards: {' '.join(community)}")
+        parts.append("")
+
+        # 当前对手信息
+        parts.append("=== Active Opponents at Table ===")
+        players = game_state.get("players", [])
+        for p in players:
+            if p["name"] != player_name and p.get("is_active", True):
+                status = "ACTIVE"
+                if p.get("is_all_in"):
+                    status = "ALL-IN"
+                parts.append(f"  {p['name']}: {p['chips']} chips | Status: {status}")
+        parts.append("")
+
+        # 对手统计数据
+        parts.append(opponent_analysis_text)
+        parts.append("")
+
+        parts.append("Based on the above statistical data and behavioral patterns, "
+                     "classify each opponent's strategy type and provide specific "
+                     "counter-strategy advice for the CURRENT hand situation.")
+        parts.append("")
+        parts.append("Your analysis (JSON only):")
+
+        return "\n".join(parts)
+
     @staticmethod
     def build_reflection_prompt(
         game_state: Dict[str, Any],

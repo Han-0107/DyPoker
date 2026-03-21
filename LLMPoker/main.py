@@ -26,6 +26,7 @@ from poker_engine.game import PokerGame, Action, ActionType
 from poker_engine.player import Player
 from llm_agent.agent import LLMAgent
 from llm_agent.human_agent import HumanAgent
+from llm_agent.prompt_builder import PromptBuilder
 from utils.gpu_utils import setup_cuda_devices
 from utils.markdown_logger import MarkdownLogger
 from utils.console_display import (
@@ -78,6 +79,7 @@ def run_game(
     lora_paths: Optional[list[str]] = None,
     human: bool = False,
     human_name: str = "You 🧑",
+    enable_multi_agent: bool = True,
 ):
     """运行德州扑克对局"""
 
@@ -90,6 +92,9 @@ def run_game(
     print_banner(n_players, n_hands, model_path, tensor_parallel_size)
     if human:
         print(f"  🎮 人机对战模式 — 你是: {human_name}")
+        print()
+    if enable_multi_agent:
+        print(f"  🤖 Multi-Agent 模式已启用 — 标准策略 + 对手分析 + Coordinator")
         print()
 
     # ── Markdown 日志 ──
@@ -136,6 +141,7 @@ def run_game(
                 vllm_gpu_memory_utilization=gpu_memory_utilization,
                 vllm_max_model_len=max_model_len,
                 lora_paths=lora_paths,
+                enable_multi_agent=enable_multi_agent,
             )
 
     # ── 创建游戏 ──
@@ -233,6 +239,45 @@ def run_game(
         print(f"\n  ⏱️ 本手耗时: {hand_time:.1f}s")
         md.write_hand_time(hand_time)
 
+        # ── Multi-Agent: 记录对手行为数据 ──
+        if enable_multi_agent:
+            # 获取当前手牌的位置映射
+            players_info = [p.to_dict(hide_hand=True) for p in game.players]
+            dealer_name = game.players[game.dealer_idx].name
+            positions = PromptBuilder._get_positions(players_info, dealer_name)
+            action_history = [a.to_dict() for a in game.action_history]
+
+            # 为每个 LLM Agent 记录对手行为
+            for agent_name, agent in agents.items():
+                if isinstance(agent, LLMAgent):
+                    agent.record_hand_result(
+                        action_history=action_history,
+                        positions=positions,
+                        big_blind=big_blind,
+                    )
+
+            # 打印对手分析摘要（每5手或最后一手）
+            if hand_num % 5 == 0 or hand_num == n_hands:
+                # 选第一个 LLM Agent 作为展示
+                for agent_name, agent in agents.items():
+                    if isinstance(agent, LLMAgent) and agent.enable_multi_agent:
+                        summaries = agent.get_opponent_summaries()
+                        if summaries:
+                            print(f"\n  📊 对手策略分析 (from {agent_name}):")
+                            for s in summaries:
+                                print(f"     {s['name']:<15} "
+                                      f"Type: {s['type']:<30} "
+                                      f"Confidence: {s['confidence']:<6} "
+                                      f"VPIP: {s['vpip']}")
+                            md._add(f"\n### 对手策略分析 (Hand #{hand_num})")
+                            md._add("| Player | Type | Confidence | VPIP | PFR |")
+                            md._add("|--------|------|------------|------|-----|")
+                            for s in summaries:
+                                md._add(f"| {s['name']} | {s['type']} | "
+                                        f"{s['confidence']} | {s['vpip']} | {s['pfr']} |")
+                            md._add("")
+                        break
+
         # 当前筹码
         print("  💰 当前筹码:")
         for p in sorted(game.players, key=lambda x: x.chips, reverse=True):
@@ -306,6 +351,14 @@ def main():
     parser.add_argument("--name", type=str, default="You 🧑",
                         help="人类玩家的显示名称 (默认 'You 🧑')")
 
+    # Multi-Agent 模式
+    parser.add_argument("--multi-agent", action="store_true", default=True,
+                        dest="multi_agent",
+                        help="🤖 启用 Multi-Agent 协调决策 (默认启用)")
+    parser.add_argument("--no-multi-agent", action="store_false",
+                        dest="multi_agent",
+                        help="禁用 Multi-Agent 模式，使用纯标准策略")
+
     # 通用参数
     parser.add_argument("--players", type=int, default=6, help="玩家总数 (2-10, 默认6)")
     parser.add_argument("--hands", type=int, default=5, help="总手数")
@@ -353,6 +406,7 @@ def main():
         lora_paths=args.lora,
         human=args.human,
         human_name=args.name,
+        enable_multi_agent=args.multi_agent,
     )
 
 

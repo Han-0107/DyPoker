@@ -15,10 +15,12 @@ LLMPoker/
 │   ├── player.py              #   玩家模型
 │   └── game.py                #   游戏主逻辑（发牌、下注、摊牌）
 │
-├── llm_agent/                 # 🤖 LLM Agent 模块
-│   ├── agent.py               #   LLM 决策代理
+├── llm_agent/                 # 🤖 Multi-Agent 决策模块
+│   ├── agent.py               #   LLM 决策代理（支持 Multi-Agent 协调）
+│   ├── opponent_analyzer.py   #   🔍 对手策略分析 Agent（7 种策略分类）
+│   ├── coordinator.py         #   🎯 Multi-Agent 协调器（综合决策）
 │   ├── human_agent.py         #   人类玩家交互代理（终端交互）
-│   ├── prompt_builder.py      #   Prompt 构建器（PokerBench 风格）
+│   ├── prompt_builder.py      #   Prompt 构建器（PokerBench 风格 + 对手分析）
 │   └── vllm_provider.py       #   vLLM 本地推理引擎封装
 │
 ├── utils/                     # 🔧 工具模块
@@ -45,31 +47,43 @@ LLMPoker/
 
 ## 🏗️ 架构设计
 
+### Multi-Agent 协调决策架构
+
 ```
-┌─────────────────────────┐          ┌─────────────────────────┐
-│     Poker Engine        │          │      LLM Agent          │
-│                         │  游戏状态  │                         │
-│  - 发牌                 │─────────►│  - 构建 Prompt           │
-│  - 下注逻辑             │          │  - 调用本地 vLLM 模型     │
-│  - 牌力评估             │◄─────────│  - 解析 LLM 响应          │
-│  - 判断输赢             │  动作决策  │  - 返回动作              │
-│                         │          │                         │
-│                         │          └────────────┬────────────┘
-│                         │                       │ 本地推理
-│                         │                       ▼
-│                         │          ┌─────────────────────────┐
-│                         │          │   vLLM Engine (本地GPU)  │
-│                         │          │   Qwen2.5 / Qwen3 / ... │
-│                         │          └─────────────────────────┘
-│                         │
-│                         │          ┌─────────────────────────┐
-│                         │  游戏状态  │     Human Agent 🎮      │
-│                         │─────────►│                         │
-│                         │          │  - 终端美化展示游戏状态    │
-│                         │◄─────────│  - 接收用户键盘输入       │
-│                         │  动作决策  │  - 验证操作合法性         │
-└─────────────────────────┘          └─────────────────────────┘
+                              ┌──────────────────────────────────────────────────────┐
+                              │              Multi-Agent Decision System             │
+                              │                                                      │
+                              │  ┌─────────────────────────┐                         │
+                              │  │  Agent 1: Standard       │                         │
+                              │  │  Strategy (SFT+GRPO)     │──┐                      │
+                              │  │                           │  │  标准策略建议          │
+                              │  │  经过训练的标准决策模型     │  │                      │
+ ┌─────────────────────────┐  │  └─────────────────────────┘  │  ┌──────────────────┐ │
+ │     Poker Engine        │  │                               ├─►│   Coordinator    │ │
+ │                         │  │  ┌─────────────────────────┐  │  │                  │ │
+ │  - 发牌                 │──┤  │  Agent 2: Opponent       │  │  │  综合两个Agent   │ │
+ │  - 下注逻辑             │  │  │  Analyzer                │──┘  │  的建议给出      │ │
+ │  - 牌力评估             │◄─┤  │                           │     │  最终决策        │ │
+ │  - 判断输赢             │  │  │  分析对手历史行为          │     └──────┬───────────┘ │
+ │                         │  │  │  分类 7 种策略类型         │            │ 最终动作     │
+ │                         │  │  │  给出反制建议              │            │             │
+ └─────────────────────────┘  │  └─────────────────────────┘            │             │
+         │                    └─────────────────────────────────────────┼─────────────┘
+         │                                                              │
+         │                                    ┌─────────────────────────┘
+         │                                    ▼
+         │                    ┌─────────────────────────┐
+         │                    │   vLLM Engine (本地GPU)  │
+         │                    │   Qwen2.5 / Qwen3 / ... │
+         │                    └─────────────────────────┘
          │
+         │                    ┌─────────────────────────┐
+         │          游戏状态   │     Human Agent 🎮      │
+         │──────────────────►│                         │
+         │                   │  - 终端美化展示游戏状态    │
+         │◄──────────────────│  - 接收用户键盘输入       │
+         │         动作决策   │  - 验证操作合法性         │
+         │                   └─────────────────────────┘
          ▼
 ┌─────────────────────────┐
 │     Utils               │
@@ -79,7 +93,54 @@ LLMPoker/
 └─────────────────────────┘
 ```
 
+### Multi-Agent 决策流程
+
+```
+游戏状态输入
+     │
+     ▼
+┌─────────────────────────────┐
+│  Agent 1: Standard Strategy │    经过 SFT + GRPO 训练的标准策略模型
+│  → 基于当前牌面、位置、      │    给出基准决策（如 "raise 30"）
+│    底池赔率给出标准决策       │
+└──────────────┬──────────────┘
+               │
+               │  同时
+               │
+┌──────────────▼──────────────┐
+│  Agent 2: Opponent Analyzer │    基于对手历史行为统计
+│  → 分析对手策略类型          │    (VPIP, PFR, 翻后激进度, 位置加注率...)
+│  → 给出针对性反制建议        │    分类为 7 种策略类型之一
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│  Coordinator                │    LLM 综合两个 Agent 的建议
+│  → 综合标准策略 + 对手分析   │    判断是否需要调整标准策略
+│  → 输出最终决策              │    (如: 对手是 Weak-Tight → 加大bluff)
+└──────────────┬──────────────┘
+               │
+               ▼
+          最终动作
+```
+
+### 对手策略分类
+
+Opponent Analyzer 将对手分类为以下 7 种策略类型：
+
+| 策略类型 | 人群占比 | 行为特征 | 反制策略 |
+|---------|---------|---------|---------|
+| ABC Player / Balanced | 13% | 行动分布均匀，无明显偏好 | 增加极化 bluff，薄价值下注 |
+| Selective Value Aggressor | 3% | 翻后仅在高价值情况下 call/raise | fold 边缘牌，在对方弱范围 bluff |
+| Tight-Passive / Rock | 21% | 翻前保守，翻后被动偏好 check/call | 激进偷盲，中等牌力价值下注 |
+| Positional Grinder | 15% | 偏好晚位小加注，利用位置 | 3-bet 其晚位 open，翻后 check-raise |
+| Weak-Tight / Passive Recreational | 33% | 翻后大量 check，受压就 fold | 激进 c-bet，多街 bluff，频繁偷盲 |
+| Loose-Passive / Calling Station | 10% | 频繁 call，很少 raise | 薄价值下注，避免 bluff，不慢打 |
+| Early-Position Aggressor | 5% | 频繁早位 raise | flat call 陷阱，3-bet 优质手牌 |
+
 **核心特性：**
+- **🤖 Multi-Agent 协调决策** — 标准策略 Agent + 对手分析 Agent + Coordinator 三步协调
+- **🔍 对手策略分类** — 实时分析对手行为，分类为 7 种策略类型并给出反制建议
 - **纯本地推理** — 通过 vLLM 加载模型，无需外部 API
 - **自动选 GPU** — 启动时自动检测空闲显存，选择最优 GPU
 - **多人对局** — 支持 2-10 人德州扑克
@@ -90,14 +151,14 @@ LLMPoker/
 ## 🧠 训练流水线
 
 ```
- ┌─────────────────┐         ┌──────────────────────┐         ┌─────────────────┐
- │   Stage 1: SFT  │         │   Stage 2: GRPO      │         │    Inference     │
- │                 │         │                      │         │                 │
- │  PokerBench     │────────►│  phh-dataset         │────────►│  main.py        │
- │  (solver最优解)  │  LoRA   │  (人类专家胜者策略)    │  LoRA   │  (vLLM 对局)    │
- │                 │ adapter │                      │ adapter │                 │
- │ train_pokerbench│         │ train_grpo_phh.py    │         │                 │
- └─────────────────┘         └──────────────────────┘         └─────────────────┘
+ ┌─────────────────┐         ┌──────────────────────┐         ┌──────────────────────┐
+ │   Stage 1: SFT  │         │   Stage 2: GRPO      │         │    Inference         │
+ │                 │         │                      │         │    (Multi-Agent)      │
+ │  PokerBench     │────────►│  phh-dataset         │────────►│                      │
+ │  (solver最优解)  │  LoRA   │  (人类专家胜者策略)    │  LoRA   │  Standard Agent      │
+ │                 │ adapter │                      │ adapter │  + Opponent Analyzer  │
+ │ train_pokerbench│         │ train_grpo_phh.py    │         │  + Coordinator        │
+ └─────────────────┘         └──────────────────────┘         └──────────────────────┘
 ```
 
 | 阶段 | 数据来源 | 方法 | 目标 |
@@ -117,7 +178,7 @@ pip install -r requirements.txt
 ### 2. 运行对局
 
 ```bash
-# 默认6人100手
+# 默认6人5手（Multi-Agent 模式默认启用）
 python main.py
 
 # 4人10手
@@ -137,6 +198,9 @@ CUDA_VISIBLE_DEVICES=2,3 python main.py --players 4 --hands 10
 
 # 使用 LoRA 适配器
 python main.py --model /path/to/base --lora /path/to/adapter
+
+# 禁用 Multi-Agent 模式（仅使用标准策略 Agent）
+python main.py --no-multi-agent
 ```
 
 ### 🎮 3. 人机对战模式
@@ -183,6 +247,8 @@ python main.py --human --model /path/to/model --tp 4
 |------|--------|------|
 | `--human` | `false` | 🎮 加入一个人类玩家（替换第一个AI） |
 | `--name` | `You 🧑` | 人类玩家的显示名称 |
+| `--multi-agent` | `true` | 🤖 启用 Multi-Agent 协调决策（默认启用） |
+| `--no-multi-agent` | — | 禁用 Multi-Agent 模式，使用纯标准策略 |
 | `--players` | `6` | 玩家总数 (2-10) |
 | `--hands` | `5` | 总手数 |
 | `--chips` | `1000` | 初始筹码 |
