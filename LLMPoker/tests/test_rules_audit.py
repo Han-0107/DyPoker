@@ -155,44 +155,46 @@ class TestRaising(unittest.TestCase):
         self.assertEqual(g.min_raise, 10)
 
     def test_raise_below_min_rejected(self):
-        """加注低于最小额应被拒绝"""
+        """加注低于最小额应被拒绝 (raise to 语义)"""
         g = make_game(n=2, chips=1000, sb=5, bb=10)
         g.start_new_hand()
         cur = g.get_current_player()
-        # call_amount = 10 - 5 = 5, min_raise=10, 所以最少要 5+10=15
-        # 但 raise amount 表示的是总下注 (放入的筹码)
-        # 尝试 raise 10 (不够, 因为 call_amount=5, min_raise=10 → 需要15)
-        result = g.execute_action(Action(cur.name, ActionType.RAISE, amount=10))
+        # Heads-up preflop: P1 是庄家/SB(bet=5), current_bet=10, min_raise=10
+        # raise to 至少 current_bet + min_raise = 10 + 10 = 20
+        # 尝试 raise to 15 (不够)
+        result = g.execute_action(Action(cur.name, ActionType.RAISE, amount=15))
         self.assertFalse(result["success"])
 
     def test_valid_raise(self):
-        """合法加注"""
+        """合法加注 (raise to 语义)"""
         g = make_game(n=2, chips=1000, sb=5, bb=10)
         g.start_new_hand()
         cur = g.get_current_player()
-        # 需要至少 call(5) + min_raise(10) = 15
+        # Heads-up preflop: P1 是 SB(bet=5), current_bet=10, min_raise=10
+        # raise to 至少 20, raise to 25 是合法的
         result = g.execute_action(Action(cur.name, ActionType.RAISE, amount=25))
         self.assertTrue(result["success"])
 
     def test_reraise_updates_min_raise(self):
-        """re-raise 应更新 min_raise"""
+        """re-raise 应更新 min_raise (raise to 语义)"""
         g = make_game(n=2, chips=1000, sb=5, bb=10)
         g.start_new_hand()
-        # P1 (dealer/SB, current_bet=5) raises to 30 → 放入25筹码
-        # current_bet 变成 30, raise_size = 30 - 10 = 20
+        # P1 (dealer/SB, current_bet=5) raises to 30
+        # chips_to_put = 30 - 5 = 25, current_bet 变成 30
+        # raise_size = 30 - 10 = 20
         cur = g.get_current_player()
-        g.execute_action(Action(cur.name, ActionType.RAISE, amount=25))
-        # min_raise 应至少为 20
+        g.execute_action(Action(cur.name, ActionType.RAISE, amount=30))
+        # min_raise 应至少为 20 (上次的加注增量)
         self.assertGreaterEqual(g.min_raise, 20)
 
     def test_raise_resets_others_acted(self):
-        """加注后其他玩家的 has_acted 应被重置"""
+        """加注后其他玩家的 has_acted 应被重置 (raise to 语义)"""
         g = make_game(n=3, chips=1000)
         g.start_new_hand()
         # P1(UTG) calls
         cur = g.get_current_player()
         g.execute_action(Action(cur.name, ActionType.CALL))
-        # P2(SB) raises
+        # P2(SB) raises to 30
         cur = g.get_current_player()
         g.execute_action(Action(cur.name, ActionType.RAISE, amount=30))
         # P3(BB) 和 P1 的 has_acted 应被重置为 False
@@ -200,6 +202,63 @@ class TestRaising(unittest.TestCase):
         p3 = g.get_player_by_name("P3")
         self.assertFalse(p1.has_acted)
         self.assertFalse(p3.has_acted)
+
+    def test_reraise_must_be_at_least_double_previous_raise(self):
+        """
+        关键规则测试：
+        A raise to 360 后, B re-raise 必须至少 raise to 360 + raise_size
+        (即加注增量必须 >= 上次加注的增量)
+        场景复现用户报告的 bug
+        """
+        g = make_game(n=2, chips=2000, sb=5, bb=10)
+        g.start_new_hand()
+        # Preflop: P1(SB, current_bet=5), P2(BB, current_bet=10)
+        # current_bet=10, min_raise=10
+        cur = g.get_current_player()
+        self.assertEqual(cur.name, "P1")
+
+        # P1 raise to 30 (raise_size = 30 - 10 = 20)
+        g.execute_action(Action("P1", ActionType.RAISE, amount=30))
+        self.assertEqual(g.current_bet, 30)
+        self.assertEqual(g.min_raise, 20)
+
+        # P2 re-raise to 100 (raise_size = 100 - 30 = 70)
+        g.execute_action(Action("P2", ActionType.RAISE, amount=100))
+        self.assertEqual(g.current_bet, 100)
+        self.assertEqual(g.min_raise, 70)
+
+        # P1 re-raise to 360 (raise_size = 360 - 100 = 260)
+        g.execute_action(Action("P1", ActionType.RAISE, amount=360))
+        self.assertEqual(g.current_bet, 360)
+        self.assertEqual(g.min_raise, 260)
+
+        # P2 re-raise to 500 应该被拒绝 (500 < 360 + 260 = 620)
+        result = g.execute_action(Action("P2", ActionType.RAISE, amount=500))
+        self.assertFalse(result["success"], "Raise to 500 should be rejected (min is 620)")
+
+        # P2 re-raise to 620 应该成功
+        result = g.execute_action(Action("P2", ActionType.RAISE, amount=620))
+        self.assertTrue(result["success"], "Raise to 620 should succeed (meets minimum)")
+        self.assertEqual(g.current_bet, 620)
+
+    def test_no_raise_option_when_chips_insufficient(self):
+        """
+        当筹码不够最小加注时, valid_actions 不应包含 raise
+        """
+        # P1 有很多筹码, P2 只有 25
+        players = [Player(name="P1", chips=1000), Player(name="P2", chips=25)]
+        g = PokerGame(players=players, small_blind=5, big_blind=10, seed=42)
+        g.start_new_hand()
+        # P1(SB, bet=5): raise to 30
+        g.execute_action(Action("P1", ActionType.RAISE, amount=30))
+        # P2(BB, bet=10, chips=15): call_amount=20, min_raise=20
+        # P2 需要 20(call) + 20(min_raise) = 40 才能 raise, 但只有 15 筹码
+        cur = g.get_current_player()
+        self.assertEqual(cur.name, "P2")
+        valid = g.get_valid_actions()
+        self.assertNotIn(ActionType.RAISE, valid, "P2 should not be able to raise with insufficient chips")
+        self.assertIn(ActionType.CALL, valid)
+        self.assertIn(ActionType.ALL_IN, valid)
 
 
 # ═════════════════════════════════════════════════════════
@@ -447,12 +506,14 @@ class TestPotCalculation(unittest.TestCase):
         self.assertEqual(g.pot, 20)
 
     def test_pot_after_raise(self):
-        """加注后底池增加"""
+        """加注后底池增加 (raise to 语义)"""
         g = make_game(n=2, sb=5, bb=10)
         g.start_new_hand()
         cur = g.get_current_player()
-        g.execute_action(Action(cur.name, ActionType.RAISE, amount=25))
-        # P1(SB=5) raises, places 25 more → current_bet=30, pot=15+25=40
+        # P1(SB, current_bet=5) raise to 30
+        # chips_to_put = 30 - 5 = 25
+        g.execute_action(Action(cur.name, ActionType.RAISE, amount=30))
+        # pot = 15 + 25 = 40
         self.assertEqual(g.pot, 40)
 
     def test_chips_conservation(self):
@@ -485,6 +546,68 @@ class TestValidActions(unittest.TestCase):
         cur = g.get_current_player()
         result = g.execute_action(Action(cur.name, ActionType.CHECK))
         self.assertFalse(result["success"])
+
+    def test_cannot_check_after_raise(self):
+        """别人 raise 之后，接住的操作应该是 call 而不是 check"""
+        g = make_game(n=2, sb=5, bb=10)
+        g.start_new_hand()
+        # P1(SB) raise to 30
+        cur = g.get_current_player()
+        g.execute_action(Action(cur.name, ActionType.RAISE, amount=30))
+        # P2(BB) 面对 raise，valid_actions 应包含 call 但不包含 check
+        cur = g.get_current_player()
+        valid = g.get_valid_actions()
+        self.assertNotIn(ActionType.CHECK, valid)
+        self.assertIn(ActionType.CALL, valid)
+        # 尝试 check 应失败
+        result = g.execute_action(Action(cur.name, ActionType.CHECK))
+        self.assertFalse(result["success"])
+
+    def test_cannot_check_after_allin(self):
+        """别人 all-in 之后，接住的操作应该是 call 而不是 check"""
+        g = make_game(n=2, sb=5, bb=10, chips=100)
+        g.start_new_hand()
+        # P1(SB) all-in
+        cur = g.get_current_player()
+        g.execute_action(Action(cur.name, ActionType.ALL_IN))
+        # P2(BB) 面对 all-in，valid_actions 应包含 call 但不包含 check
+        cur = g.get_current_player()
+        valid = g.get_valid_actions()
+        self.assertNotIn(ActionType.CHECK, valid)
+        self.assertIn(ActionType.CALL, valid)
+
+    def test_raise_at_least_double_of_bet(self):
+        """别人 bet(raise from 0) 之后，raise 的金额至少是 bet 的两倍"""
+        g = make_game(n=3, chips=1000, sb=5, bb=10)
+        g.start_new_hand()
+        # 进入 flop
+        play_until_phase(g, GamePhase.FLOP)
+        # flop: current_bet=0, min_raise=big_blind=10
+        # P2(SB) bets (raise to) 30
+        cur = g.get_current_player()
+        g.execute_action(Action(cur.name, ActionType.RAISE, amount=30))
+        # 此时 current_bet=30, min_raise=30 (raise_size=30-0=30)
+        # P3(BB) 想 raise，至少要 raise to 30+30=60
+        cur = g.get_current_player()
+        # 尝试 raise to 50 应失败（不够 60）
+        result = g.execute_action(Action(cur.name, ActionType.RAISE, amount=50))
+        self.assertFalse(result["success"])
+        # raise to 60 应成功
+        result = g.execute_action(Action(cur.name, ActionType.RAISE, amount=60))
+        self.assertTrue(result["success"])
+
+    def test_raise_to_semantics_correct(self):
+        """验证 raise to 语义：amount 代表目标下注总额，不是额外投入"""
+        g = make_game(n=2, chips=1000, sb=5, bb=10)
+        g.start_new_hand()
+        # P1(SB, current_bet=5) raise to 25
+        cur = g.get_current_player()
+        p1_chips_before = cur.chips  # 995
+        g.execute_action(Action(cur.name, ActionType.RAISE, amount=25))
+        # P1 应投入 25 - 5 = 20 额外筹码
+        self.assertEqual(cur.chips, p1_chips_before - 20)
+        self.assertEqual(cur.current_bet, 25)
+        self.assertEqual(g.current_bet, 25)
 
     def test_cannot_call_zero(self):
         """无需跟注时不能 call"""

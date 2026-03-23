@@ -107,12 +107,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-steps", type=int, default=200, help="Save every N steps")
     parser.add_argument("--merge-lora", action="store_true",
                         help="Merge LoRA into base weights after training")
+    parser.add_argument("--fast", action="store_true",
+                        help="Fast training mode: group_size=2, 1 epoch, "
+                             "max 8000 samples, grad_accum=4, save every 100 steps")
+    parser.add_argument("--resume-from", type=int, default=0,
+                        help="Resume training from this global step (skip that many steps)")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── Fast mode overrides ──
+    if args.fast:
+        args.group_size = min(args.group_size, 2)
+        args.epochs = 1
+        args.max_train_samples = min(args.max_train_samples, 8000)
+        args.grad_accum_steps = min(args.grad_accum_steps, 4)
+        args.save_steps = min(args.save_steps, 100)
+        args.max_new_tokens = min(args.max_new_tokens, 128)
+        logger.info("⚡ Fast mode enabled: group_size=%d, epochs=%d, "
+                     "max_samples=%d, grad_accum=%d, max_new_tokens=%d",
+                     args.group_size, args.epochs, args.max_train_samples,
+                     args.grad_accum_steps, args.max_new_tokens)
 
     # Set seeds
     random.seed(args.seed)
@@ -240,6 +258,7 @@ def main():
     global_step = 0
     best_reward = -float("inf")
     train_log = []
+    skip_steps = args.resume_from  # skip this many optimizer steps if resuming
 
     for epoch in range(args.epochs):
         logger.info(f"\n{'=' * 40} Epoch {epoch + 1}/{args.epochs} {'=' * 40}")
@@ -250,6 +269,15 @@ def main():
         for batch_idx, batch in enumerate(train_loader):
             prompts = batch["prompts"]
             completions = batch["completions"]
+
+            # Skip batches if resuming
+            if skip_steps > 0 and (batch_idx + 1) % args.grad_accum_steps == 0:
+                skip_steps -= 1
+                global_step += 1
+                scheduler.step()
+                if global_step % 50 == 0:
+                    logger.info(f"  Skipping step {global_step} (resuming)...")
+                continue
 
             loss, metrics = grpo_step(
                 model=model, ref_model=ref_model, tokenizer=tokenizer,

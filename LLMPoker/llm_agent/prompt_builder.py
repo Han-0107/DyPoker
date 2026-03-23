@@ -67,13 +67,15 @@ Output JSON schema (no prose):
 {
   "reasoning": "1-3 short bullet-style thoughts",
   "action": "fold" | "check" | "call" | "raise" | "all_in",
-  "raise_amount": <number, required only for "raise">,
+  "raise_amount": <number, required only for "raise", means "raise to" this total bet amount>,
   "confidence": 0-1  // optional, omit if unsure
 }
 
 Rules:
 - Honor the provided valid_actions list; never invent other actions.
-- For raises, amount = max(min_raise + call_amount, minimum table rule) but not exceeding your stack. If amount >= your_chips → use "all_in".
+- For raises, raise_amount uses "raise to" semantics: it is the TOTAL bet level you want to reach (not the extra chips you put in). For example, if current_bet is 20 and you want to raise, raise_amount must be at least min_raise_to (e.g., 40). If raise_amount >= your current_bet + your_chips → use "all_in".
+- After someone raises or goes all-in, you must call (not check) to stay in the hand.
+- The minimum raise must be at least the size of the previous raise increment above the current bet. For example, if someone bets 30, a raise must be to at least 60 (30 + 30).
 - If call_amount is 0, prefer check over raise with weak/medium hands; avoid folding preflop unless hand is very weak and pressured.
 - Use pot odds, position, board texture, and action history to justify the move concisely.
 - Keep responses deterministic and well-formatted JSON only (no markdown, no extra text)."""
@@ -294,8 +296,11 @@ Rules:
             parts.append(f"To remind you, the current pot size is {pot} chips.")
 
         # 额外上下文（不在 PokerBench 中但对实时游戏很重要）
+        min_raise_to = game_state.get("min_raise_to", current_bet + min_raise)
         parts.append(f"Your chips: {your_chips}. Amount to call: {call_amount}. "
-                      f"Minimum raise: {min_raise}.")
+                      f"Current bet: {current_bet}. "
+                      f"Minimum raise to: {min_raise_to} (raise_amount uses 'raise to' semantics, "
+                      f"i.e., the total bet level you want to reach).")
         parts.append(f"Valid actions: {', '.join(valid_actions)}.")
         parts.append("")
         parts.append("Decide on an action based on the strength of your hand on this board, "

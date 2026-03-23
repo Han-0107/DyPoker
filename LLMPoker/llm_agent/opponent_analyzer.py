@@ -224,11 +224,13 @@ class OpponentAnalyzer:
         # 跟踪当前街
         current_street = "preflop"
 
-        # 记录参与这手牌的对手
+        # 记录参与这手牌的对手（跳过阶段标记和盲注等非玩家行动）
         participants = set()
         for h in action_history:
             p_name = h.get("player", "")
-            if p_name and p_name != self.my_name:
+            action = h.get("action", "")
+            # 跳过阶段标记（_dealer）和盲注，只记录真正的玩家行为
+            if p_name and p_name != self.my_name and action not in ("phase", "blind"):
                 participants.add(p_name)
 
         # 为参与的对手增加手数计数

@@ -139,7 +139,7 @@ class HumanAgent:
             "fold":   f"🚫 fold   — 弃牌",
             "check":  f"✋ check  — 过牌（不加注）",
             "call":   f"📞 call   — 跟注 ({call_amount} 筹码)",
-            "raise":  f"💰 raise  — 加注 (最少 {call_amount + min_raise}，输入总额)",
+            "raise":  f"💰 raise  — 加注 (raise to 至少 {call_amount + min_raise + (state.get('current_bet', 0) - call_amount)}，即下注到的目标总额)",
             "all_in": f"🔥 all_in — 全下 ({your_chips} 筹码)",
         }
 
@@ -202,14 +202,20 @@ class HumanAgent:
                 if action == "raise":
                     call_amount = game_state.get("call_amount", 0)
                     min_raise = game_state.get("min_raise", 0)
+                    current_bet = game_state.get("current_bet", 0)
                     your_chips = game_state.get("your_chips", 0)
-                    min_total = call_amount + min_raise
+                    # 玩家当前已下注额
+                    player_current_bet = current_bet - call_amount
+                    # "raise to" 语义的最小目标
+                    min_raise_to = current_bet + min_raise
+                    # 最大 raise to = 玩家当前已下注 + 全部筹码
+                    max_raise_to = player_current_bet + your_chips
 
                     while True:
                         try:
                             amt_input = input(
-                                f"  {GREEN}💰 输入加注总额 "
-                                f"(最少 {min_total}, 最多 {your_chips}, "
+                                f"  {GREEN}💰 输入 raise to 目标总额 "
+                                f"(最少 {min_raise_to}, 最多 {max_raise_to}, "
                                 f"输入 'all' 全下): {RESET}"
                             ).strip().lower()
 
@@ -219,14 +225,15 @@ class HumanAgent:
                                 break
 
                             amount = int(amt_input)
-                            if amount >= your_chips:
+                            if amount >= max_raise_to:
                                 # 超过筹码 → all_in
-                                print(f"  {YELLOW}⚠️ 金额 >= 你的筹码，自动转为 ALL-IN{RESET}")
+                                print(f"  {YELLOW}⚠️ 金额 >= 你能下注到的最大值，自动转为 ALL-IN{RESET}")
                                 action = "all_in"
                                 amount = 0
                                 break
-                            elif amount < min_total:
-                                print(f"  {RED}❌ 加注总额至少为 {min_total}{RESET}")
+                            elif amount < min_raise_to:
+                                print(f"  {RED}❌ raise to 目标至少为 {min_raise_to} "
+                                      f"(当前注 {current_bet} + 最小加注增量 {min_raise}){RESET}")
                                 continue
                             else:
                                 break

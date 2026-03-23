@@ -220,10 +220,21 @@ def run_game(
             result = game.execute_action(action)
 
             if not result.get("success"):
-                print(f"      ❌ 错误: {result.get('error')}")
-                md.write_action_error(result.get('error', ''))
-                fold_action = Action(current.name, ActionType.FOLD)
-                game.execute_action(fold_action)
+                error_msg = result.get('error', '')
+                print(f"      ❌ 错误: {error_msg}")
+                md.write_action_error(error_msg)
+                # 智能回退：raise 失败时尝试 call，而不是直接 fold
+                valid = game.get_valid_actions()
+                if ActionType.CALL in valid:
+                    fallback = Action(current.name, ActionType.CALL)
+                    print(f"      ↩️ 回退为 call")
+                elif ActionType.CHECK in valid:
+                    fallback = Action(current.name, ActionType.CHECK)
+                    print(f"      ↩️ 回退为 check")
+                else:
+                    fallback = Action(current.name, ActionType.FOLD)
+                    print(f"      ↩️ 回退为 fold")
+                game.execute_action(fallback)
 
             # 检查阶段变化（动作执行后）
             if game.phase.name != prev_phase:

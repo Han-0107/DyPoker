@@ -230,7 +230,10 @@ class PokerGame:
         else:
             actions.append(ActionType.CALL)
 
-        if player.chips > call_amount:
+        # 只有当筹码足够满足最小加注时才提供 raise 选项
+        # 即需要先跟注 (call_amount)，再加注至少 min_raise 的增量
+        min_chips_to_raise = max(call_amount, 0) + self.min_raise
+        if player.chips > min_chips_to_raise:
             actions.append(ActionType.RAISE)
 
         actions.append(ActionType.ALL_IN)
@@ -270,6 +273,8 @@ class PokerGame:
             state["call_amount"] = max(0, call_amount)
             state["your_chips"] = current_player.chips
             state["your_hand"] = [str(c) for c in current_player.hand]
+            # 最小加注到的目标总额（raise to 语义）
+            state["min_raise_to"] = self.current_bet + self.min_raise
 
         return state
 
@@ -314,13 +319,24 @@ class PokerGame:
             logger.info(f"  {player.name} calls {actual}")
 
         elif action.action_type == ActionType.RAISE:
-            call_amount = self.current_bet - player.current_bet
-            total_amount = action.amount
-            if total_amount < call_amount + self.min_raise and total_amount < player.chips:
-                # 允许小于min_raise的all-in
-                return {"error": f"Raise must be at least {call_amount + self.min_raise}",
+            # action.amount 语义为 "raise to"，即下注到的目标总额
+            raise_to = action.amount
+            min_raise_to = self.current_bet + self.min_raise
+            logger.info(f"  [RAISE validation] {player.name}: raise_to={raise_to}, "
+                        f"current_bet={self.current_bet}, min_raise={self.min_raise}, "
+                        f"min_raise_to={min_raise_to}, player.current_bet={player.current_bet}, "
+                        f"player.chips={player.chips}")
+            if raise_to < min_raise_to and raise_to < player.current_bet + player.chips:
+                # 允许小于min_raise_to的all-in（筹码不足时）
+                return {"error": f"Raise must be at least to {min_raise_to} "
+                                 f"(current_bet={self.current_bet}, min_raise={self.min_raise})",
                         "success": False}
-            actual = player.place_bet(total_amount)
+            # 计算实际需要额外投入的筹码
+            chips_to_put = raise_to - player.current_bet
+            if chips_to_put <= 0:
+                return {"error": f"Raise to {raise_to} is not above your current bet {player.current_bet}",
+                        "success": False}
+            actual = player.place_bet(chips_to_put)
             self.pot += actual
             raise_size = player.current_bet - self.current_bet
             if raise_size > 0:
@@ -331,7 +347,7 @@ class PokerGame:
                 if p is not player and p.is_active and not p.is_all_in:
                     p.has_acted = False
             result["amount"] = actual
-            logger.info(f"  {player.name} raises to {self.current_bet} (bet {actual})")
+            logger.info(f"  {player.name} raises to {self.current_bet} (put in {actual})")
 
         elif action.action_type == ActionType.ALL_IN:
             actual = player.place_bet(player.chips)

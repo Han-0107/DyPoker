@@ -37,7 +37,9 @@ Guidelines:
 - If opponent data is insufficient (low confidence or few observed hands), lean heavily toward the Standard Strategy Agent's recommendation.
 - Consider the specific counter-strategy advice when deciding whether to upgrade (e.g., check → raise) or downgrade (e.g., raise → call/fold) the standard action.
 - Always honor the valid_actions list; never invent actions not available.
-- For raises, the amount must be at least min_raise + call_amount, but not exceeding your stack.
+- After someone raises or goes all-in, you must call (not check) to stay in the hand.
+- For raises, raise_amount uses "raise to" semantics: it is the TOTAL bet level you want to reach. For example, if current_bet is 20 and min_raise is 20, then raise_amount must be at least 40. If the chips needed (raise_amount - your current bet) >= your stack, use "all_in".
+- The minimum raise must be at least the size of the previous raise increment above the current bet.
 
 Output JSON schema (no prose):
 {
@@ -80,7 +82,11 @@ Keep responses deterministic and well-formatted JSON only (no markdown, no extra
         parts.append(f"Pot: {game_state.get('pot', 0)} chips")
         parts.append(f"Your chips: {game_state.get('your_chips', 0)}")
         parts.append(f"Amount to call: {game_state.get('call_amount', 0)}")
-        parts.append(f"Minimum raise: {game_state.get('min_raise', 10)}")
+        current_bet = game_state.get('current_bet', 0)
+        min_raise = game_state.get('min_raise', 10)
+        min_raise_to = game_state.get('min_raise_to', current_bet + min_raise)
+        parts.append(f"Current bet: {current_bet}")
+        parts.append(f"Minimum raise to: {min_raise_to} (raise_amount uses 'raise to' semantics)")
 
         hand_cards = game_state.get("your_hand", [])
         if hand_cards:
@@ -210,26 +216,43 @@ Keep responses deterministic and well-formatted JSON only (no markdown, no extra
             else:
                 action = "fold"
 
-        # 处理 raise 金额
+        # 处理 raise 金额（amount 语义为 "raise to" 目标总额）
         if action == "raise":
             min_raise = game_state.get("min_raise", 10)
             call_amount = game_state.get("call_amount", 0)
+            current_bet = game_state.get("current_bet", 0)
             your_chips = game_state.get("your_chips", 0)
-            min_total = call_amount + min_raise
+            # 玩家当前已下注额
+            player_current_bet = current_bet - call_amount
+            # 最小 raise to 目标（优先使用引擎提供的精确值）
+            min_raise_to = game_state.get("min_raise_to", current_bet + min_raise)
 
             if isinstance(amount, str):
                 try:
                     amount = float(amount)
                 except ValueError:
-                    amount = min_total
+                    amount = min_raise_to
 
-            if amount <= call_amount and call_amount > 0 and "call" in valid_actions:
+            logger.info(f"[Coordinator] Raise amount from LLM: {amount}, "
+                        f"current_bet={current_bet}, min_raise={min_raise}, "
+                        f"min_raise_to={min_raise_to}, player_current_bet={player_current_bet}")
+
+            # 如果 LLM 给出的金额看起来是"额外投入"而非"raise to"，进行修正
+            if amount > 0 and amount < current_bet and current_bet > 0:
+                logger.info(f"[Coordinator] Converting amount {amount} from 'extra chips' "
+                            f"to 'raise to': {player_current_bet + amount}")
+                amount = player_current_bet + amount
+
+            if amount <= current_bet and call_amount > 0 and "call" in valid_actions:
                 action = "call"
                 amount = 0
-            elif amount < min_total:
-                amount = min_total
+            elif amount < min_raise_to:
+                logger.info(f"[Coordinator] Raise amount {amount} below min_raise_to "
+                            f"{min_raise_to}, forcing to {min_raise_to}")
+                amount = min_raise_to
 
-            if action == "raise" and amount >= your_chips:
+            chips_needed = amount - player_current_bet
+            if action == "raise" and chips_needed >= your_chips:
                 action = "all_in"
                 amount = 0
 

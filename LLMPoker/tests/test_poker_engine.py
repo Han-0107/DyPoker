@@ -275,6 +275,7 @@ class TestPokerGame(unittest.TestCase):
         game.start_new_hand()
 
         current = game.get_current_player()
+        # raise to 30 (raise_to 语义: current_bet=10, min_raise=10, 所以 raise to 至少 20)
         action = Action(current.name, ActionType.RAISE, amount=30)
         result = game.execute_action(action)
         self.assertTrue(result["success"])

@@ -122,6 +122,9 @@ def generate_group_responses(
 ) -> List[List[str]]:
     """Generate `group_size` responses for each prompt.
 
+    Uses batch generation: for each prompt, duplicate it `group_size` times
+    and generate all responses in a single forward pass.
+
     Returns: list of lists, shape [batch_size, group_size]
     """
     all_responses = []
@@ -134,22 +137,28 @@ def generate_group_responses(
         chat_text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
         )
+
+        # Batch: duplicate the same prompt group_size times for parallel generation
+        batch_texts = [chat_text] * group_size
         inputs = tokenizer(
-            chat_text, return_tensors="pt", truncation=True, max_length=1024,
+            batch_texts, return_tensors="pt", truncation=True,
+            max_length=1024, padding=True,
         ).to(model.device)
 
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+        prompt_len = inputs["input_ids"].shape[1]
         responses = []
-        for _ in range(group_size):
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=True,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
-            gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
+        for i in range(group_size):
+            gen_ids = outputs[i][prompt_len:]
             resp = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
             responses.append(resp)
 
@@ -210,6 +219,94 @@ def compute_log_probs(
     return token_log_probs.mean()
 
 
+def compute_log_probs_batch(
+    model,
+    tokenizer,
+    prompt_text: str,
+    response_texts: List[str],
+    max_length: int = 1280,
+) -> List[torch.Tensor]:
+    """Compute log-probabilities for multiple responses of the same prompt in one batch.
+
+    This is much faster than calling compute_log_probs() in a loop because it
+    batches all responses into a single forward pass through the model.
+
+    Returns: list of scalar tensors (one per response).
+    """
+    if not response_texts:
+        return []
+
+    # Build prompt prefix (shared across all responses)
+    prompt_messages = [
+        {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
+        {"role": "user", "content": prompt_text},
+    ]
+    prompt_text_only = tokenizer.apply_chat_template(
+        prompt_messages, tokenize=False, add_generation_prompt=True,
+    )
+    prompt_ids = tokenizer(
+        prompt_text_only, return_tensors="pt", truncation=True, max_length=max_length,
+    )["input_ids"]
+    prompt_len = prompt_ids.shape[1]
+
+    # Build full texts for all responses
+    full_texts = []
+    for resp in response_texts:
+        messages = [
+            {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_text},
+            {"role": "assistant", "content": resp},
+        ]
+        full_texts.append(tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False,
+        ))
+
+    # Tokenize as a batch with padding
+    encoding = tokenizer(
+        full_texts, return_tensors="pt", truncation=True,
+        max_length=max_length, padding=True,
+    ).to(model.device)
+
+    input_ids = encoding["input_ids"]
+    attention_mask = encoding["attention_mask"]
+
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits
+
+    results = []
+    for i in range(len(response_texts)):
+        shift_logits_i = logits[i:i+1, prompt_len - 1:-1, :]
+        shift_labels_i = input_ids[i:i+1, prompt_len:]
+
+        # Mask out padding tokens
+        mask_i = attention_mask[i:i+1, prompt_len:]
+
+        if shift_labels_i.shape[1] == 0 or mask_i.sum() == 0:
+            results.append(torch.tensor(0.0, device=model.device, requires_grad=True))
+            continue
+
+        log_probs_i = F.log_softmax(shift_logits_i, dim=-1)
+        token_log_probs_i = log_probs_i.gather(2, shift_labels_i.unsqueeze(-1)).squeeze(-1)
+
+        # Apply mask: only count non-padding tokens
+        masked_log_probs = token_log_probs_i * mask_i
+        mean_log_prob = masked_log_probs.sum() / mask_i.sum().clamp(min=1)
+        results.append(mean_log_prob)
+
+    return results
+
+    shift_logits = logits[:, prompt_len - 1:-1, :]
+    shift_labels = input_ids[:, prompt_len:]
+
+    if shift_labels.shape[1] == 0:
+        return torch.tensor(0.0, device=model.device, requires_grad=True)
+
+    log_probs = F.log_softmax(shift_logits, dim=-1)
+    token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+    return token_log_probs.mean()
+
+
 # ─────────────────────────────────────────────────────────
 #  GRPO Step
 # ─────────────────────────────────────────────────────────
@@ -228,10 +325,12 @@ def grpo_step(
     """Perform one GRPO step.
 
     For each prompt:
-      1. Generate `group_size` responses
+      1. Generate `group_size` responses (batch)
       2. Compute rewards for each response (vs expert action)
       3. Compute group-relative advantages
       4. Update policy to maximize advantage-weighted log-probs with KL penalty
+
+    Uses batched log-prob computation for efficiency.
 
     Returns: (loss, metrics_dict)
     """
@@ -271,23 +370,36 @@ def grpo_step(
         else:
             advantages = rewards_tensor - rewards_tensor.mean()
 
-        for g_idx in range(group_size):
-            if abs(advantages[g_idx].item()) < 1e-8:
-                continue
+        # Filter to responses with non-zero advantage
+        valid_indices = [i for i in range(group_size) if abs(advantages[i].item()) >= 1e-8]
+        if not valid_indices:
+            continue
 
-            resp = responses[g_idx]
-            adv = advantages[g_idx].to(next(model.parameters()).device)
+        valid_responses = [responses[i] for i in valid_indices]
+        valid_advantages = [advantages[i] for i in valid_indices]
+        valid_rewards = [rewards[i] for i in valid_indices]
 
-            log_prob = compute_log_probs(model, tokenizer, prompt, resp)
+        # Batch compute log-probs for policy model
+        policy_log_probs = compute_log_probs_batch(
+            model, tokenizer, prompt, valid_responses,
+        )
 
-            with torch.no_grad():
-                ref_log_prob = compute_log_probs(ref_model, tokenizer, prompt, resp)
+        # Batch compute log-probs for reference model (no grad)
+        with torch.no_grad():
+            ref_log_probs = compute_log_probs_batch(
+                ref_model, tokenizer, prompt, valid_responses,
+            )
+
+        for i in range(len(valid_indices)):
+            adv = valid_advantages[i].to(next(model.parameters()).device)
+            log_prob = policy_log_probs[i]
+            ref_log_prob = ref_log_probs[i]
 
             kl = log_prob - ref_log_prob
             sample_loss = -(adv * log_prob) + kl_coeff * kl
 
             total_loss = total_loss + sample_loss
-            total_reward += rewards[g_idx]
+            total_reward += valid_rewards[i]
             total_kl += kl.detach().item()
             n_valid += 1
 
